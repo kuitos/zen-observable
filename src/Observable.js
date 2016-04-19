@@ -140,7 +140,8 @@ function Subscription(observer, subscriber) {
 }
 
 addMethods(Subscription.prototype = {}, {
-    unsubscribe() { closeSubscription(this) }
+    get closed() { return subscriptionClosed(this) },
+    unsubscribe() { closeSubscription(this) },
 });
 
 function SubscriptionObserver(subscription) {
@@ -148,6 +149,8 @@ function SubscriptionObserver(subscription) {
 }
 
 addMethods(SubscriptionObserver.prototype = {}, {
+
+    get closed() { return subscriptionClosed(this._subscription) },
 
     next(value) {
 
@@ -262,24 +265,76 @@ addMethods(Observable.prototype, {
             if (typeof fn !== "function")
                 throw new TypeError(fn + " is not a function");
 
+            let state = "executing",
+                queue = [];
+
+            function send(type, value) {
+
+                switch (type) {
+
+                    case "error":
+                        state = "completed";
+                        reject(value);
+                        return;
+
+                    case "complete":
+                        state = "completed";
+                        resolve(value);
+                        return;
+                }
+
+                try {
+
+                    state = "executing";
+                    fn(value);
+
+                    if (queue.length === 0)
+                        state = "ready";
+
+                } catch (err) {
+
+                    state = "completed";
+                    subscription.unsubscribe();
+                    reject(err);
+                }
+            }
+
+            function enqueue(type, value) {
+
+                if (state === "completed")
+                    return;
+
+                if (state === "ready")
+                    return send(type, value);
+
+                // Assert: state === "executing"
+                if (queue.length === 0)
+                    Promise.resolve().then(flush);
+
+                queue.push({ type, value });
+            }
+
+            function flush() {
+
+                let list = queue;
+                queue = [];
+
+                for (let entry of list) {
+
+                    send(entry.type, entry.value);
+
+                    if (state === "completed")
+                        return;
+                }
+            }
+
             let subscription = this.subscribe({
-
-                next(value) {
-
-                    try {
-
-                        return fn(value);
-
-                    } catch (e) {
-
-                        reject(e);
-                        subscription.unsubscribe();
-                    }
-                },
-
-                error: reject,
-                complete: resolve,
+                next(x) { enqueue("next", x) },
+                error(x) { enqueue("error", x) },
+                complete(x) { enqueue("complete", x) },
             });
+
+            state = "ready";
         });
     },
 
@@ -294,6 +349,9 @@ addMethods(Observable.prototype, {
 
             next(value) {
 
+                if (observer.closed)
+                    return;
+
                 try { value = fn(value) }
                 catch (e) { return observer.error(e) }
 
@@ -301,7 +359,7 @@ addMethods(Observable.prototype, {
             },
 
             error(e) { return observer.error(e) },
-            complete() { return observer.complete() },
+            complete(x) { return observer.complete(x) },
         }));
     },
 
@@ -316,7 +374,10 @@ addMethods(Observable.prototype, {
 
             next(value) {
 
-                try { if (!fn(value)) return undefined; }
+                if (observer.closed)
+                    return;
+
+                try { if (!fn(value)) return undefined }
                 catch (e) { return observer.error(e) }
 
                 return observer.next(value);
@@ -342,6 +403,9 @@ addMethods(Observable.prototype, {
 
             next(value) {
 
+                if (observer.closed)
+                    return;
+
                 let first = !hasValue;
                 hasValue = true;
 
@@ -360,8 +424,10 @@ addMethods(Observable.prototype, {
 
             complete() {
 
-                if (!hasValue && !hasSeed)
+                if (!hasValue && !hasSeed) {
                     observer.error(new TypeError("Cannot reduce an empty sequence"));
+                    return;
+                }
 
                 observer.next(acc);
                 observer.complete();
@@ -400,12 +466,17 @@ addMethods(Observable.prototype, {
                         }
                     }
 
+                    let subscription;
+
                     // Subscribe to the inner Observable
-                    let subscription = Observable.from(value).subscribe({
+                    subscription = Observable.from(value).subscribe({
 
                         next(value) { observer.next(value) },
                         error(e) { observer.error(e) },
                         complete() {
+
+                            if (!subscription)
+                                return;
 
                             let i = subscriptions.indexOf(subscription);
 
@@ -416,10 +487,14 @@ addMethods(Observable.prototype, {
                         }
                     });
 
-                    subscriptions.push(subscription);
+                    if (!subscription.closed)
+                        subscriptions.push(subscription);
                 },
 
-                error(e) { return observer.error(e) },
+                error(e) {
+
+                    return observer.error(e);
+                },
 
                 complete() {
 
@@ -476,53 +551,33 @@ addMethods(Observable, {
 
         return new C(observer => {
 
-            let done = false;
+            // Assume that the object is iterable.  If not, then the observer
+            // will receive an error.
+            try {
 
-            enqueueJob(_=> {
+                if (hasSymbol("iterator")) {
 
-                if (done)
-                    return;
+                    for (let item of x)
+                        observer.next(item);
 
-                // Assume that the object is iterable.  If not, then the observer
-                // will receive an error.
-                try {
+                } else {
 
-                    if (hasSymbol("iterator")) {
+                    if (!Array.isArray(x))
+                        throw new Error(x + " is not an Array");
 
-                        for (let item of x) {
-
-                            observer.next(item);
-
-                            if (done)
-                                return;
-                        }
-
-                    } else {
-
-                        if (!Array.isArray(x))
-                            throw new Error(x + " is not an Array");
-
-                        for (let i = 0; i < x.length; ++i) {
-
-                            observer.next(x[i]);
-
-                            if (done)
-                                return;
-                        }
-                    }
-
-                } catch (e) {
-
-                    // If observer.next throws an error, then the subscription will
-                    // be closed and the error method will simply rethrow
-                    observer.error(e);
-                    return;
+                    for (let i = 0; i < x.length; ++i)
+                        observer.next(x[i]);
                 }
 
-                observer.complete();
-            });
+            } catch (e) {
 
-            return _=> { done = true };
+                // If observer.next throws an error, then the subscription will
+                // be closed and the error method will simply rethrow
+                observer.error(e);
+                return;
+            }
+
+            observer.complete();
         });
     },
 
@@ -532,25 +587,10 @@ addMethods(Observable, {
 
         return new C(observer => {
 
-            let done = false;
+            for (let i = 0; i < items.length; ++i)
+                observer.next(items[i]);
 
-            enqueueJob(_=> {
-
-                if (done)
-                    return;
-
-                for (let i = 0; i < items.length; ++i) {
-
-                    observer.next(items[i]);
-
-                    if (done)
-                        return;
-                }
-
-                observer.complete();
-            });
-
-            return _=> { done = true };
+            observer.complete();
         });
     },
 
