@@ -266,7 +266,7 @@ addMethods(Observable.prototype, {
                 throw new TypeError(fn + " is not a function");
 
             let state = "executing",
-                queue = [];
+                queue = null;
 
             function send(type, value) {
 
@@ -288,7 +288,7 @@ addMethods(Observable.prototype, {
                     state = "executing";
                     fn(value);
 
-                    if (queue.length === 0)
+                    if (!queue || queue.length === 0)
                         state = "ready";
 
                 } catch (err) {
@@ -308,6 +308,9 @@ addMethods(Observable.prototype, {
                     return send(type, value);
 
                 // Assert: state === "executing"
+                if (!queue)
+                    queue = [];
+
                 if (queue.length === 0)
                     Promise.resolve().then(flush);
 
