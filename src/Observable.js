@@ -140,7 +140,6 @@ function Subscription(observer, subscriber) {
 }
 
 addMethods(Subscription.prototype = {}, {
-    get closed() { return subscriptionClosed(this) },
     unsubscribe() { closeSubscription(this) },
 });
 
@@ -149,8 +148,6 @@ function SubscriptionObserver(subscription) {
 }
 
 addMethods(SubscriptionObserver.prototype = {}, {
-
-    get closed() { return subscriptionClosed(this._subscription) },
 
     next(value) {
 
@@ -350,13 +347,17 @@ addMethods(Observable.prototype, {
 
         return new C(observer => this.subscribe({
 
-            next(value) {
+            next(value, subscription) {
 
-                if (observer.closed)
-                    return;
+                try {
 
-                try { value = fn(value) }
-                catch (e) { return observer.error(e) }
+                    value = fn(value);
+
+                } catch (e) {
+
+                    subscription.unsubscribe();
+                    return observer.error(e);
+                }
 
                 return observer.next(value);
             },
@@ -375,13 +376,18 @@ addMethods(Observable.prototype, {
 
         return new C(observer => this.subscribe({
 
-            next(value) {
+            next(value, subscription) {
 
-                if (observer.closed)
-                    return;
+                try {
 
-                try { if (!fn(value)) return undefined }
-                catch (e) { return observer.error(e) }
+                    if (!fn(value))
+                        return undefined;
+
+                } catch (e) {
+
+                    subscription.unsubscribe();
+                    return observer.error(e);
+                }
 
                 return observer.next(value);
             },
@@ -404,18 +410,22 @@ addMethods(Observable.prototype, {
 
         return new C(observer => this.subscribe({
 
-            next(value) {
-
-                if (observer.closed)
-                    return;
+            next(value, subscription) {
 
                 let first = !hasValue;
                 hasValue = true;
 
                 if (!first || hasSeed) {
 
-                    try { acc = fn(acc, value) }
-                    catch (e) { return observer.error(e) }
+                    try {
+
+                        acc = fn(acc, value);
+
+                    } catch (e) {
+
+                        subscription.unsubscribe();
+                        return observer.error(e);
+                    }
 
                 } else {
 
@@ -469,7 +479,7 @@ addMethods(Observable.prototype, {
                         }
                     }
 
-                    let subscription;
+                    let subscription, closed = false;
 
                     // Subscribe to the inner Observable
                     subscription = Observable.from(value).subscribe({
@@ -477,6 +487,8 @@ addMethods(Observable.prototype, {
                         next(value) { observer.next(value) },
                         error(e) { observer.error(e) },
                         complete() {
+
+                            closed = true;
 
                             if (!subscription)
                                 return;
@@ -490,7 +502,7 @@ addMethods(Observable.prototype, {
                         }
                     });
 
-                    if (!subscription.closed)
+                    if (!closed)
                         subscriptions.push(subscription);
                 },
 
